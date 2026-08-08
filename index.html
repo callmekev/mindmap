@@ -76,7 +76,7 @@
 <div id="toolbar">
   <span class="title">🧠 輕量思維導圖</span>
   <button id="btn-new">新建</button>
-  <button id="btn-image">插入圖片</button>
+  <button id="btn-image" title="也可以先點選節點，再按 Ctrl+V / Cmd+V 直接貼上圖片">插入圖片</button>
   <button id="btn-link">插入/編輯連結</button>
   <button id="btn-export">導出 JSON</button>
   <button id="btn-import">導入 JSON</button>
@@ -172,6 +172,7 @@
       nodeMenu: true,
       keypress: true,
       locale: 'zh_TW',
+      pasteHandler: handlePasteImage,
     });
     mind.init(loadInitialData());
     setStatus('初始化完成', 'ok');
@@ -298,6 +299,43 @@
       img.onerror = () => reject(new Error('無法讀取圖片尺寸'));
       img.src = dataUrl;
     });
+  }
+
+  // ---------- 剪貼簿直接貼上圖片（Ctrl+V / Cmd+V）----------
+  // mind-elixir 預設只處理文字貼上，圖片需要透過 pasteHandler 鉤子自行實現
+  async function handlePasteImage(e) {
+    if (!e.clipboardData || !e.clipboardData.items) return;
+    let imageItem = null;
+    for (const item of e.clipboardData.items) {
+      if (item.type && item.type.startsWith('image/')) {
+        imageItem = item;
+        break;
+      }
+    }
+    if (!imageItem) return; // 不是圖片，交給預設的文字貼上邏輯處理
+
+    if (!mind || !mind.currentNode) {
+      setStatus('請先點選一個節點，再貼上圖片', 'warn');
+      return;
+    }
+    const file = imageItem.getAsFile();
+    if (!file) {
+      setStatus('無法讀取剪貼簿中的圖片', 'error');
+      return;
+    }
+    try {
+      e.preventDefault();
+      setStatus('圖片處理中...');
+      const dataUrl = await compressImageToDataUrl(file, MAX_IMAGE_DIMENSION);
+      const dims = await getImageDimensions(dataUrl);
+      await mind.reshapeNode(mind.currentNode, {
+        image: { url: dataUrl, width: dims.width, height: dims.height },
+      });
+      setStatus('圖片已貼上', 'ok');
+      scheduleSave();
+    } catch (err) {
+      setStatus('貼上圖片失敗：' + err.message, 'error');
+    }
   }
 
   // ---------- 插入/編輯連結 ----------
