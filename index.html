@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>輕量思維導圖</title>
+
+<!-- 固定版本CDN，避免未來版本升級導致行為不一致 -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mind-elixir@5.15.1/dist/MindElixir.css" />
+
+<style>
+  :root {
+    --bar-height: 52px;
+    --accent: #4c4f69;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+  }
+  #toolbar {
+    height: var(--bar-height);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    background: #2c2e3f;
+    color: #fff;
+    flex-wrap: wrap;
+  }
+  #toolbar button {
+    background: #454866;
+    color: #fff;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  #toolbar button:hover { background: var(--accent); }
+  #toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #toolbar .title {
+    font-weight: 600;
+    margin-right: 12px;
+    font-size: 14px;
+    opacity: 0.85;
+  }
+  #status {
+    margin-left: auto;
+    font-size: 12px;
+    opacity: 0.85;
+    max-width: 40vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #status.err { color: #ff8080; font-weight: 600; }
+  #status.ok { color: #9be89b; }
+  #map {
+    position: absolute;
+    top: var(--bar-height);
+    left: 0; right: 0; bottom: 0;
+  }
+  #hidden-inputs { display: none; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <span class="title">🧠 輕量思維導圖</span>
+  <button id="btn-new">新建</button>
+  <button id="btn-image">插入圖片</button>
+  <button id="btn-link">插入/編輯連結</button>
+  <button id="btn-export">導出 JSON</button>
+  <button id="btn-import">導入 JSON</button>
+  <span id="status">初始化中...</span>
+</div>
+
+<div id="map"></div>
+
+<div id="hidden-inputs">
+  <input type="file" id="file-image" accept="image/*" />
+  <input type="file" id="file-import" accept="application/json,.json" />
+</div>
+
+<script type="module">
+  // ------------------------------------------------------------------
+  // 輕量思維導圖 - 單文件應用
+  // 基於 mind-elixir@5.15.1 (https://github.com/SSShooter/mind-elixir-core)
+  // 設計原則：本地優先、自動保存、無後端依賴、失敗有明確提示不靜默丟數據
+  // ------------------------------------------------------------------
+
+  import MindElixir, { E } from 'https://cdn.jsdelivr.net/npm/mind-elixir@5.15.1/dist/MindElixir.js';
+  import { zh_TW } from 'https://cdn.jsdelivr.net/npm/mind-elixir@5.15.1/dist/i18n.js';
+
+  const STORAGE_KEY = 'mindmap-lite-data-v1';
+  const MAX_IMAGE_DIMENSION = 480; // 插入圖片時的最大邊長，超過會被壓縮，避免localStorage被撐爆
+  const AUTOSAVE_DEBOUNCE_MS = 800;
+
+  const statusEl = document.getElementById('status');
+  const btnNew = document.getElementById('btn-new');
+  const btnImage = document.getElementById('btn-image');
+  const btnLink = document.getElementById('btn-link');
+  const btnExport = document.getElementById('btn-export');
+  const btnImport = document.getElementById('btn-import');
+  const fileImageInput = document.getElementById('file-image');
+  const fileImportInput = document.getElementById('file-import');
+
+  // ---------- 日誌 / 狀態提示（雙通道：console + 可見狀態列）----------
+  function setStatus(msg, level = 'info') {
+    const time = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+    statusEl.textContent = `[${time}] ${msg}`;
+    statusEl.className = level === 'error' ? 'err' : (level === 'ok' ? 'ok' : '');
+    const logFn = level === 'error' ? console.error : (level === 'warn' ? console.warn : console.log);
+    logFn(`[mindmap-lite ${time}]`, msg);
+  }
+
+  // ---------- 讀取本地存檔（帶容錯，損壞資料不會導致白屏）----------
+  function loadInitialData() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        setStatus('沒有找到本地存檔，建立新的思維導圖');
+        return MindElixir.new('新主題');
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || !parsed.nodeData || typeof parsed.nodeData.topic === 'undefined') {
+        throw new Error('存檔格式不符合預期（缺少 nodeData.topic）');
+      }
+      setStatus('已從本地存檔恢復');
+      return parsed;
+    } catch (err) {
+      setStatus('本地存檔讀取失敗，已改用空白導圖（原資料未被覆蓋，可嘗試手動檢查瀏覽器localStorage）：' + err.message, 'error');
+      return MindElixir.new('新主題');
+    }
+  }
+
+  // ---------- 初始化 ----------
+  let mind;
+  try {
+    mind = new MindElixir({
+      el: '#map',
+      direction: MindElixir.SIDE,
+      draggable: true,
+      contextMenu: {
+        locale: zh_TW,
+        focus: true,
+        link: true,
+      },
+      toolBar: true,
+      nodeMenu: true,
+      keypress: true,
+      locale: 'zh_TW',
+    });
+    mind.init(loadInitialData());
+    setStatus('初始化完成', 'ok');
+  } catch (err) {
+    setStatus('思維導圖初始化失敗：' + err.message, 'error');
+    console.error(err);
+  }
+
+  // ---------- 自動保存（防抖 + 失敗明確提示，不靜默丟資料）----------
+  let saveTimer = null;
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(doSave, AUTOSAVE_DEBOUNCE_MS);
+  }
+  function doSave() {
+    try {
+      const data = mind.getData();
+      const json = JSON.stringify(data);
+      localStorage.setItem(STORAGE_KEY, json);
+      setStatus('已自動保存', 'ok');
+    } catch (err) {
+      // 常見原因：localStorage 容量已滿（QuotaExceededError）
+      setStatus('自動保存失敗！請立即點擊「導出JSON」備份，避免資料遺失。原因：' + err.message, 'error');
+    }
+  }
+
+  if (mind) {
+    mind.bus.addListener('operation', scheduleSave);
+  }
+
+  // 頁面即將關閉/切後台時，盡最大努力再保存一次
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && mind) doSave();
+  });
+  window.addEventListener('beforeunload', () => {
+    if (mind) doSave();
+  });
+
+  // ---------- 新建 ----------
+  btnNew.addEventListener('click', () => {
+    if (!mind) return;
+    const ok = window.confirm('確定要新建嗎？目前內容會被清空（建議先「導出JSON」備份）。');
+    if (!ok) return;
+    try {
+      const fresh = MindElixir.new('新主題');
+      mind.refresh(fresh);
+      doSave();
+      setStatus('已新建思維導圖', 'ok');
+    } catch (err) {
+      setStatus('新建失敗：' + err.message, 'error');
+    }
+  });
+
+  // ---------- 插入圖片（壓縮到 MAX_IMAGE_DIMENSION 以內，轉base64內嵌保存）----------
+  btnImage.addEventListener('click', () => {
+    if (!mind) return;
+    if (!mind.currentNode) {
+      setStatus('請先點選一個節點，再插入圖片', 'warn');
+      return;
+    }
+    fileImageInput.value = '';
+    fileImageInput.click();
+  });
+
+  fileImageInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (!mind.currentNode) {
+      setStatus('節點選取狀態已丟失，請重新點選節點後再試', 'warn');
+      return;
+    }
+    try {
+      setStatus('圖片處理中...');
+      const dataUrl = await compressImageToDataUrl(file, MAX_IMAGE_DIMENSION);
+      const dims = await getImageDimensions(dataUrl);
+      await mind.reshapeNode(mind.currentNode, {
+        image: { url: dataUrl, width: dims.width, height: dims.height },
+      });
+      setStatus('圖片已插入', 'ok');
+      scheduleSave();
+    } catch (err) {
+      setStatus('插入圖片失敗：' + err.message, 'error');
+    }
+  });
+
+  function compressImageToDataUrl(file, maxDim) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('讀取圖片文件失敗'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('圖片解碼失敗，可能不是有效的圖片文件'));
+        img.onload = () => {
+          try {
+            let { width, height } = img;
+            if (width > maxDim || height > maxDim) {
+              const scale = Math.min(maxDim / width, maxDim / height);
+              width = Math.round(width * scale);
+              height = Math.round(height * scale);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            // 有透明通道的圖用png，否則用jpeg降低體積
+            const isPng = file.type === 'image/png' || file.type === 'image/gif';
+            const out = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85);
+            resolve(out);
+          } catch (err) {
+            reject(err);
+          }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function getImageDimensions(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.width, height: img.height });
+      img.onerror = () => reject(new Error('無法讀取圖片尺寸'));
+      img.src = dataUrl;
+    });
+  }
+
+  // ---------- 插入/編輯連結 ----------
+  // 右鍵選單本身已內建連結功能(contextMenu.link=true)，這裡額外提供一個
+  // 明確的工具列按鈕，確保功能一定可用，不依賴使用者發現右鍵選單。
+  btnLink.addEventListener('click', () => {
+    if (!mind) return;
+    if (!mind.currentNode) {
+      setStatus('請先點選一個節點，再插入連結', 'warn');
+      return;
+    }
+    const nodeObj = mind.currentNode.nodeObj;
+    const existing = nodeObj && nodeObj.hyperLink ? nodeObj.hyperLink : '';
+    const url = window.prompt('輸入連結網址（留空可清除已有連結）：', existing);
+    if (url === null) return; // 使用者取消
+    try {
+      mind.reshapeNode(mind.currentNode, { hyperLink: url.trim() || undefined });
+      setStatus(url.trim() ? '連結已更新' : '連結已清除', 'ok');
+      scheduleSave();
+    } catch (err) {
+      setStatus('更新連結失敗：' + err.message, 'error');
+    }
+  });
+
+  // ---------- 導出 JSON ----------
+  btnExport.addEventListener('click', () => {
+    if (!mind) return;
+    try {
+      const data = mind.getData();
+      const json = JSON.stringify(data, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `mindmap-${ts}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus('已導出 JSON 文件', 'ok');
+    } catch (err) {
+      setStatus('導出失敗：' + err.message, 'error');
+    }
+  });
+
+  // ---------- 導入 JSON ----------
+  btnImport.addEventListener('click', () => {
+    fileImportInput.value = '';
+    fileImportInput.click();
+  });
+
+  fileImportInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => setStatus('讀取文件失敗', 'error');
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || !parsed.nodeData || typeof parsed.nodeData.topic === 'undefined') {
+          throw new Error('文件格式不符合預期（缺少 nodeData.topic），不是本工具導出的JSON');
+        }
+        const ok = window.confirm('導入將覆蓋目前畫面內容（建議先導出備份），確定要繼續嗎？');
+        if (!ok) return;
+        mind.refresh(parsed);
+        doSave();
+        setStatus('導入成功', 'ok');
+      } catch (err) {
+        setStatus('導入失敗，文件未被載入，目前內容保持不變：' + err.message, 'error');
+      }
+    };
+    reader.readAsText(file);
+  });
+
+  // ---------- 全局錯誤兜底：任何未捕獲異常都要讓使用者看到，而不是靜默失敗 ----------
+  window.addEventListener('error', (e) => {
+    setStatus('發生未預期錯誤：' + (e.message || '未知錯誤'), 'error');
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    setStatus('發生未預期錯誤（Promise）：' + (e.reason && e.reason.message ? e.reason.message : e.reason), 'error');
+  });
+</script>
+
+</body>
+</html>
