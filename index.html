@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>輕量思維導圖</title>
 
-<!-- 固定版本CDN，避免未來版本升級導致行為不一致 -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/mind-elixir@5.15.1/dist/MindElixir.css" />
+<!-- 本地打包，不依賴外部CDN，避免CDN被牆/被廣告攔截器/離線時卡死 -->
+<link rel="stylesheet" href="./vendor/MindElixir.css" />
 
 <style>
   :root {
@@ -91,9 +91,6 @@
   // 設計原則：本地優先、自動保存、無後端依賴、失敗有明確提示不靜默丟數據
   // ------------------------------------------------------------------
 
-  import MindElixir, { E } from 'https://cdn.jsdelivr.net/npm/mind-elixir@5.15.1/dist/MindElixir.js';
-  import { zh_TW } from 'https://cdn.jsdelivr.net/npm/mind-elixir@5.15.1/dist/i18n.js';
-
   const STORAGE_KEY = 'mindmap-lite-data-v1';
   const MAX_IMAGE_DIMENSION = 480; // 插入圖片時的最大邊長，超過會被壓縮，避免localStorage被撐爆
   const AUTOSAVE_DEBOUNCE_MS = 800;
@@ -134,6 +131,23 @@
       setStatus('本地存檔讀取失敗，已改用空白導圖（原資料未被覆蓋，可嘗試手動檢查瀏覽器localStorage）：' + err.message, 'error');
       return MindElixir.new('新主題');
     }
+  }
+
+  // ---------- 加載引擎（本地vendor文件，失敗會有明確提示，不會靜默卡住）----------
+  let MindElixir, E, zh_TW;
+  try {
+    setStatus('正在載入思維導圖引擎...');
+    const [coreMod, i18nMod] = await Promise.all([
+      import('./vendor/MindElixir.js'),
+      import('./vendor/i18n.js'),
+    ]);
+    MindElixir = coreMod.default;
+    E = coreMod.E;
+    zh_TW = i18nMod.zh_TW;
+    if (!MindElixir) throw new Error('引擎模組已載入但缺少 default 導出，文件可能不完整');
+  } catch (err) {
+    setStatus('引擎加載失敗，無法初始化：' + err.message + '（請確認 vendor/ 資料夾內的文件與 index.html 一起部署，路徑不能改動）', 'error');
+    throw err;
   }
 
   // ---------- 初始化 ----------
