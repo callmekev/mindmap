@@ -18,7 +18,13 @@
     margin: 0; padding: 0; height: 100%;
     font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
   }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden; /* 避免整頁出現滾動條 */
+  }
   #toolbar {
+    flex: 0 0 auto; /* 固定高度，不參與伸縮 */
     height: var(--bar-height);
     display: flex;
     align-items: center;
@@ -58,9 +64,9 @@
   #status.err { color: #ff8080; font-weight: 600; }
   #status.ok { color: #9be89b; }
   #map {
-    position: absolute;
-    top: var(--bar-height);
-    left: 0; right: 0; bottom: 0;
+    flex: 1 1 auto; /* 自動撐滿工具列以外的剩餘空間 */
+    min-height: 0;  /* 關鍵：避免flex子元素因內容撐開而超出父容器 */
+    position: relative;
   }
   #hidden-inputs { display: none; }
 </style>
